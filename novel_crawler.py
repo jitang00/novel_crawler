@@ -124,6 +124,8 @@ AD_KEYWORDS = [
     '微信', 'QQ', '客服',
     '免责声明', '隐私政策', '用户协议',
     '本章报错', '纠错', '报错',
+    '下一页继续阅读', '点击继续阅读', '继续阅读',
+    '下一页', '下章', '下一节', '下一回',
 ]
 
 
@@ -173,6 +175,7 @@ class NovelCrawler:
         self.failed = []
         self.stop = False
         self.js_book_id = ""    # 从 javascript: 链接中提取的 book_id
+        self.novel_title = ""   # 小说标题
 
     # ── 请求 ──────────────────────────────────────────────────
     def fetch(self, url, retries=MAX_RETRIES):
@@ -820,7 +823,34 @@ class NovelCrawler:
 
         return lines
 
-    # ── 提取标题 ──────────────────────────────────────────────
+    # ── 提取小说标题（从目录页） ─────────────────────────────
+    def extract_novel_title(self, doc):
+        """从目录页提取小说标题"""
+        selectors = [
+            '//h1/text()',
+            '//div[@class="bookname"]/h1/text()',
+            '//div[contains(@class,"bookinfo")]//h1/text()',
+            '//div[@id="bookinfo"]//h1/text()',
+            '//h1[@class="book-title"]/text()',
+            '//div[contains(@class,"title")]/h1/text()',
+            '//title/text()',
+        ]
+        for sel in selectors:
+            try:
+                titles = doc.xpath(sel)
+                for t in titles:
+                    t = t.strip()
+                    # 清理常见的后缀（如"最新章节"、"全文阅读"等）
+                    t = re.sub(r'最新章节.*|全文阅读.*|全文.*|在线阅读.*', '', t)
+                    t = re.sub(r'_(小说网|笔趣阁|阅读网|文学网|书屋)$', '', t)
+                    t = re.sub(r'[\s\-_]+$', '', t)
+                    if t and 2 < len(t) < 100:
+                        return t
+            except Exception:
+                continue
+        return None
+
+    # ── 提取章节标题 ──────────────────────────────────────────
     def extract_title(self, doc):
         for sel in ['//h1/text()', '//*[@class="content"]/h1/text()',
                      '//*[contains(@class,"chapter")]/h1/text()',
@@ -918,6 +948,11 @@ class NovelCrawler:
 
         p(f"  ✓ 页面获取成功 (HTTP {resp.status_code})", "g")
         doc = self.parse(resp)
+
+        # 提取小说标题
+        self.novel_title = self.extract_novel_title(doc)
+        if self.novel_title:
+            p(f"  📚 小说标题: {self.novel_title}", "g")
 
         # 检测目录
         chapters = self.detect_toc(doc)
@@ -1053,15 +1088,19 @@ class NovelCrawler:
 
     # ── 保存 TXT ──────────────────────────────────────────────
     def save(self):
-        if self.contents:
-            first = self.contents[0][0]
-            name = re.sub(r'^第[一二三四五六七八九十百千万零\d]+[章回节集卷篇第部].*', '', first).strip()
-            if not name:
-                name = re.sub(r'^\d+[.、\s]+', '', first).strip()
-            if not name:
+        # 优先使用提取到的小说标题
+        name = self.novel_title
+        if not name:
+            if self.contents:
+                # 回退：从首章标题提取
+                first = self.contents[0][0]
+                name = re.sub(r'^第[一二三四五六七八九十百千万零\d]+[章回节集卷篇第部].*', '', first).strip()
+                if not name:
+                    name = re.sub(r'^\d+[.、\s]+', '', first).strip()
+                if not name:
+                    name = "小说"
+            else:
                 name = "小说"
-        else:
-            name = "小说"
 
         safe = re.sub(r'[\\/:*?"<>|\n\r\t]', '_', name)[:80]
         path = os.path.join(OUTPUT_DIR, f"{safe}.txt")
