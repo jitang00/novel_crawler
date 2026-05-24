@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-万能小说爬虫 v3.3 — 通用中文小说下载器
+万能小说爬虫 v3.4 — 通用中文小说下载器
 支持大部分小说网站，自动识别章节目录和正文，导出为 TXT 文件。
 
 v3.0: 链接密度过滤、扩展广告关键词、排除分类路径
@@ -10,6 +10,7 @@ v3.1: 排除 catalog/toc/index 路径误判、解析 javascript: 链接、
 v3.2: 简化排序逻辑 — 识别"最新章节"/"全部章节"分类，通过 URL 判断正序/倒序，
       不再按章节号重排（避免子小节被打乱）
 v3.3: 跟随章节内"下一页"子页 — 一章分多页时自动拼接完整内容
+v3.4: 多线程并发爬取 — 10 线程同时下载，自动按序拼接
 
 双击运行 EXE → 粘贴目录页 URL → 自动爬取全部章节 → 导出 TXT
 
@@ -22,7 +23,9 @@ import re
 import time
 import random
 import signal
+import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 
 try:
@@ -45,6 +48,7 @@ MIN_DELAY = 0.3
 MAX_DELAY = 1.5
 MAX_RETRIES = 3
 TIMEOUT = 20
+MAX_WORKERS = 10
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -155,7 +159,7 @@ def p(text, color="", end="\n"):
 
 def banner():
     p("═" * 56, "c")
-    p("  📚 万能小说爬虫 v3.3", "b")
+    p("  📚 万能小说爬虫 v3.4", "b")
     p("  自动识别目录 | 智能提取正文 | 导出 TXT", "d")
     p("═" * 56, "c")
     print()
@@ -176,6 +180,8 @@ class NovelCrawler:
         self.stop = False
         self.js_book_id = ""    # 从 javascript: 链接中提取的 book_id
         self.novel_title = ""   # 小说标题
+        self.lock = threading.Lock()
+        self.progress_done = 0  # 已完成的章节数
 
     # ── 请求 ──────────────────────────────────────────────────
     def fetch(self, url, retries=MAX_RETRIES):
@@ -913,6 +919,68 @@ class NovelCrawler:
 
         return None
 
+    # ── 单章节爬取（线程安全） ─────────────────────────────────
+    def _fetch_single_chapter(self, index, title, url, chapter_url_set, selector, total):
+        if self.stop:
+            return (index, None, None)
+
+        time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+
+        resp = self.fetch(url)
+        if not resp:
+            with self.lock:
+                self.failed.append((title, url, "请求失败"))
+                self.progress_done += 1
+            self._print_progress(total)
+            return (index, None, None)
+
+        doc = self.parse(resp)
+        page_title = self.extract_title(doc) or title
+        lines = self.extract_content(doc, selector)
+
+        if not lines:
+            with self.lock:
+                self.failed.append((title, url, "无法提取正文"))
+                self.progress_done += 1
+            self._print_progress(total)
+            return (index, None, None)
+
+        sub_pages = 0
+        max_sub_pages = 50
+        next_url = self._find_next_page(doc, chapter_url_set)
+        while next_url and sub_pages < max_sub_pages and not self.stop:
+            time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+            sub_resp = self.fetch(next_url)
+            if not sub_resp:
+                break
+            sub_doc = self.parse(sub_resp)
+            sub_lines = self.extract_content(sub_doc, selector)
+            if sub_lines:
+                lines.extend(sub_lines)
+                sub_pages += 1
+            else:
+                break
+            next_url = self._find_next_page(sub_doc, chapter_url_set)
+
+        with self.lock:
+            self.progress_done += 1
+
+        self._print_progress(total)
+        return (index, page_title, lines)
+
+    def _print_progress(self, total):
+        with self.lock:
+            done = self.progress_done
+        pct = done / total * 100
+        bar_w = 30
+        filled = int(bar_w * done / total)
+        bar = '█' * filled + '░' * (bar_w - filled)
+        p(f"\r  [{bar}] {pct:.0f}% ({done}/{total}) {self._failed_count_locked()} 失败", "c", end="")
+
+    def _failed_count_locked(self):
+        with self.lock:
+            return len(self.failed)
+
     # ── 主流程 ────────────────────────────────────────────────
     def run(self):
         init_console()
@@ -990,67 +1058,46 @@ class NovelCrawler:
         # 开始爬取
         print()
         p("═" * 50, "c")
-        p(f"  🚀 开始爬取 {len(chapters)} 个章节", "b")
+        p(f"  🚀 开始并发爬取 {len(chapters)} 个章节 ({MAX_WORKERS} 线程)", "b")
         p("═" * 50, "c")
         print()
 
         total = len(chapters)
         t0 = time.time()
-        chapter_url_set = set(u for _, u in chapters)  # 用于判断"下一页"是否跳到下一章
+        chapter_url_set = set(u for _, u in chapters)
 
         def on_interrupt(sig, frame):
             self.stop = True
-            p("\n\n⚠ 收到中断信号，保存已爬取内容...", "y")
+            p("\n\n⚠ 收到中断信号，等待进行中的任务完成...", "y")
         signal.signal(signal.SIGINT, on_interrupt)
 
-        for i, (title, url) in enumerate(chapters, 1):
-            if self.stop:
-                break
-
-            # 进度条
-            pct = i / total * 100
-            bar_w = 30
-            filled = int(bar_w * i / total)
-            bar = '█' * filled + '░' * (bar_w - filled)
-            info = f"({i}/{total}) {title[:25]}"
-            p(f"\r  [{bar}] {pct:.0f}% {info}", "c", end="")
-
-            if i > 1:
-                time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
-
-            resp = self.fetch(url)
-            if not resp:
-                self.failed.append((title, url, "请求失败"))
-                continue
-
-            doc = self.parse(resp)
-            page_title = self.extract_title(doc) or title
-            lines = self.extract_content(doc, selector)
-
-            if not lines:
-                self.failed.append((title, url, "无法提取正文"))
-                continue
-
-            # ── 跟随章节内"下一页"子页 ────────────────────────
-            sub_pages = 0
-            max_sub_pages = 50  # 防止无限循环
-            next_url = self._find_next_page(doc, chapter_url_set)
-            while next_url and sub_pages < max_sub_pages and not self.stop:
-                time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
-                sub_resp = self.fetch(next_url)
-                if not sub_resp:
+        results = []
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {}
+            for i, (title, url) in enumerate(chapters):
+                if self.stop:
                     break
-                sub_doc = self.parse(sub_resp)
-                sub_lines = self.extract_content(sub_doc, selector)
-                if sub_lines:
-                    lines.extend(sub_lines)
-                    sub_pages += 1
-                    # 更新进度条
-                    p(f"\r  [{bar}] {pct:.0f}% {info} (+{sub_pages}页)", "c", end="")
-                else:
-                    break
-                next_url = self._find_next_page(sub_doc, chapter_url_set)
+                future = executor.submit(
+                    self._fetch_single_chapter,
+                    i, title, url, chapter_url_set, selector, total
+                )
+                futures[future] = i
 
+            for future in as_completed(futures):
+                if self.stop:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                try:
+                    idx, page_title, lines = future.result()
+                    if page_title is not None and lines is not None:
+                        results.append((idx, page_title, lines))
+                except Exception as e:
+                    with self.lock:
+                        self.failed.append(("unknown", "", f"线程异常: {e}"))
+
+        print("\n")
+
+        results.sort(key=lambda x: x[0])
+        for _, page_title, lines in results:
             self.contents.append((page_title, lines))
 
         # 统计
