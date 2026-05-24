@@ -31,7 +31,7 @@
 
 ```bash
 # 克隆仓库（或直接下载 novel_crawler_V3.5.py）
-git clone https://github.com/你的用户名/novel-crawler.git
+git clone https://github.com/jitang000/novel-crawler.git
 cd novel-crawler
 
 # 安装依赖
