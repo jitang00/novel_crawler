@@ -1043,8 +1043,34 @@ class NovelCrawler:
         p("─" * 50, "d")
         print()
 
+        # 并发线程数选择
+        p("⚡ 并发线程数设置（同时下载的章节数）:", "b")
+        print()
+        p("  🐢 保守 [5~6] — 几乎不触发反爬，适合小站 / 敏感网站", "d")
+        p("  ⚖️ 平衡 [8~12] — 速度与安全兼顾，适合大多数网站（推荐）", "d")
+        p("  🚀 激进 [15~20] — 速度快但可能触发限流 / 临时封 IP", "d")
+        p("  ☠️ 危险 [30+] — 必定触发反爬，可能导致永久封 IP", "d")
+        print()
+        p(f"  默认 {MAX_WORKERS} 线程，直接回车使用默认值", "y")
+        workers_input = input("  请输入线程数 ▶ ").strip()
+        if workers_input == "":
+            num_workers = MAX_WORKERS
+        else:
+            try:
+                num_workers = int(workers_input)
+                if num_workers < 1:
+                    p("  线程数不能小于 1，使用默认值", "y")
+                    num_workers = MAX_WORKERS
+                elif num_workers > 50:
+                    p("  ⚠ 线程数过大（>50），已限制为 50", "y")
+                    num_workers = 50
+            except ValueError:
+                p("  输入无效，使用默认值", "y")
+                num_workers = MAX_WORKERS
+        print()
+
         # 确认
-        p("开始爬取？(y/n)", "y")
+        p(f"确认开始爬取？({num_workers} 线程) (y/n)", "y")
         choice = input("   ▶ ").strip().lower()
         if choice not in ('y', 'yes', ''):
             p("已取消", "y")
@@ -1058,7 +1084,7 @@ class NovelCrawler:
         # 开始爬取
         print()
         p("═" * 50, "c")
-        p(f"  🚀 开始并发爬取 {len(chapters)} 个章节 ({MAX_WORKERS} 线程)", "b")
+        p(f"  🚀 开始并发爬取 {len(chapters)} 个章节 ({num_workers} 线程)", "b")
         p("═" * 50, "c")
         print()
 
@@ -1072,7 +1098,7 @@ class NovelCrawler:
         signal.signal(signal.SIGINT, on_interrupt)
 
         results = []
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = {}
             for i, (title, url) in enumerate(chapters):
                 if self.stop:
