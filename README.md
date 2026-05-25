@@ -1,10 +1,11 @@
 # 📚 万能小说爬虫 v3.5
 
-一个轻量、智能的中文小说下载工具，支持绝大多数小说网站。  
+一个轻量、智能的专门为中文小说优化的下载工具，支持绝大多数小说网站。  
 自动识别章节目录、提取正文内容、处理分页章节，并导出为干净的 **TXT** 文件。
 
 > ⚠ **本程序仅供学习交流使用，请勿用于任何商业或非法用途。**  
 > 下载内容请遵守目标网站的 `robots.txt` 及用户协议，合理控制并发，尊重版权。
+Sites publish fiction under their own terms and copyright. This tool is meant for personal use only, for example keeping a backup of material you already have access to, where the licence allows it. Do not use it to redistribute or sell someone else's work. You are responsible for how you use Lightnovel Crawler.
 
 ---
 
