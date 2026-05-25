@@ -5,7 +5,7 @@
 
 > ⚠ **本程序仅供学习交流使用，请勿用于任何商业或非法用途。**  
 > 下载内容请遵守目标网站的 `robots.txt` 及用户协议，合理控制并发，尊重版权。
-Sites publish fiction under their own terms and copyright. This tool is meant for personal use only, for example keeping a backup of material you already have access to, where the licence allows it. Do not use it to redistribute or sell someone else's work. You are responsible for how you use Lightnovel Crawler.
+Sites publish fiction under their own terms and copyright. This tool is meant for personal use only, for example keeping a backup of material you already have access to, where the licence allows it. Do not use it to redistribute or sell someone else's work. You are responsible for how you use novel_crawler.
 
 ---
 
