@@ -12,9 +12,10 @@ v3.2: 简化排序逻辑 — 识别"最新章节"/"全部章节"分类，通过 
 v3.3: 跟随章节内"下一页"子页 — 一章分多页时自动拼接完整内容
 v3.4: 多线程并发爬取 — 10 线程同时下载，自动按序拼接
 v3.5: 自定义线程数 + 免责声明
-v3.6: 网站特定配置支持（对站内导航链接密度放宽阈值） — 见 SiteConfig
-v3.7: 配置与逻辑分离 — 所有匹配规则与全局设置集中到文件顶部，
-      SiteConfig 数据类 + WEBSITE_CONFIGS 字典 + GLOBAL_SETTINGS 字典
+v3.6: CrawlerConfig 类收敛全局变量，逻辑与配置初步分离
+v3.7: 配置与逻辑彻底分离 — SiteConfig 数据类 + WEBSITE_CONFIGS 字典
+      + GLOBAL_SETTINGS 字典；所有硬编码规则集中在文件顶部；
+      NovelCrawler 通过 self.config / self.settings 引用一切配置
 
 双击运行 EXE → 粘贴目录页 URL → 自动爬取全部章节 → 导出 TXT
 
@@ -45,19 +46,23 @@ except ImportError as e:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 全局设置 (GLOBAL_SETTINGS)
+# ════════════════════  配置区域（全部集中在此）  ════════════════════
 # ═══════════════════════════════════════════════════════════════════
 
+# ── 计算输出目录 ──────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
-    _output_dir = os.path.dirname(os.path.abspath(sys.executable))
+    _OUTPUT_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
-    _output_dir = os.path.dirname(os.path.abspath(__file__))
+    _OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# ═══════════════════════════════════════════════════════════════
+# 全局设置字典 — 存放所有非网站特定的运行参数
+# ═══════════════════════════════════════════════════════════════
 GLOBAL_SETTINGS: Dict = {
     # ── 输出 ──
-    "output_dir": _output_dir,
+    "output_dir": _OUTPUT_DIR,
 
-    # ── 请求 ──
+    # ── 请求头 ──
     "headers": {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -66,57 +71,90 @@ GLOBAL_SETTINGS: Dict = {
         "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
     },
+
+    # ── 请求延迟与重试 ──
     "min_delay": 0.3,
     "max_delay": 1.5,
     "max_retries": 3,
     "timeout": 20,
+    "retry_delay_min": 2,
+    "retry_delay_max": 4,
+    "toc_page_delay_min": 0.3,
+    "toc_page_delay_max": 0.8,
 
     # ── 并发 ──
     "max_workers": 10,
+    "max_workers_limit": 50,
+
+    # ── 目录检测 ──
+    "toc_sibling_search_range": 10,
+    "toc_container_search_depth": 5,
+    "toc_min_chapters_for_order": 3,
+    "toc_desc_ratio_threshold": 0.7,
+    "toc_asc_ratio_threshold": 0.3,
+
+    # ── 正文选择器探测 ──
+    "content_selector_score_threshold": 100,
 
     # ── 正文提取阈值 ──
     "content_min_text_len": 100,
     "content_heuristic_min_len": 200,
     "content_fallback_min_len": 50,
     "content_para_min_len": 5,
+    "content_part_min_len": 1,
     "link_density_max": 0.3,
     "link_density_para_max": 0.5,
-    "sub_page_max": 50,
 
     # ── 标题长度约束 ──
     "title_min_len": 2,
     "title_max_len": 100,
     "chapter_title_min_len": 2,
     "chapter_title_max_len": 80,
+
+    # ── 子页爬取 ──
+    "sub_page_max": 50,
+
+    # ── 进度条 ──
+    "progress_bar_width": 30,
+
+    # ── 文件名 ──
+    "filename_max_len": 80,
+    "default_novel_name": "小说",
+
+    # ── 编码检测 ──
+    "encoding_detect_bytes": 2000,
+    "encoding_fallbacks": ('iso-8859-1', 'latin-1'),
+    "default_encoding": 'utf-8',
 }
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 网站配置数据类 (SiteConfig) + 集中配置字典 (WEBSITE_CONFIGS)
-# ═══════════════════════════════════════════════════════════════════
-
+# ═══════════════════════════════════════════════════════════════
+# 网站配置数据类 — 封装单个网站的所有匹配规则
+# ═══════════════════════════════════════════════════════════════
 @dataclass
 class SiteConfig:
-    """单个网站的爬取配置 — 所有匹配规则、选择器、阈值集中于此"""
+    """单个网站的爬取配置 — 所有匹配规则、选择器、关键词集中于此"""
+
+    # ── 标识 ──
     name: str = ""
 
-    # ── 章节 URL 特征 ──
+    # ── 章节 URL 特征 — 用于识别哪些链接是章节 ──
     chapter_patterns: List[Pattern] = field(default_factory=list)
 
-    # ── 排除: 分类/标签/列表/目录页路径 ──
+    # ── 排除: 分类/标签/列表/目录页路径 — 这些不是章节 ──
     category_path_patterns: List[Pattern] = field(default_factory=list)
 
-    # ── 常见分类/标签文本 ──
+    # ── 常见分类/标签文本 — 过滤掉这些短词 ──
     category_tags: Set[str] = field(default_factory=set)
 
-    # ── 广告/导航关键词 ──
+    # ── 广告/导航关键词 — 包含这些的行直接丢弃 ──
     ad_keywords: List[str] = field(default_factory=list)
 
-    # ── 已知噪音元素的 class/id ──
+    # ── 已知噪音元素的 class/id — 正文提取时移除 ──
     noise_classes: Set[str] = field(default_factory=set)
     noise_ids: Set[str] = field(default_factory=set)
 
-    # ── 正文选择器探测列表 ──
+    # ── 正文选择器探测列表 (包含反爬变体如 C0NTENT) ──
     content_selectors: List[str] = field(default_factory=list)
 
     # ── 小说标题选择器 ──
@@ -125,29 +163,28 @@ class SiteConfig:
     # ── 章节标题选择器 ──
     chapter_title_selectors: List[str] = field(default_factory=list)
 
-    # ── "下一页"链接文本 ──
+    # ── "下一页"链接文本 — 用于跟踪章节内分页 ──
     next_page_texts: List[str] = field(default_factory=list)
 
-    # ── URL 跳过扩展名 ──
+    # ── URL 跳过扩展名 — 这些后缀的链接不视为章节 ──
     url_skip_extensions: Tuple[str, ...] = ()
 
-    # ── 目录/索引关键词（URL 路径段排除用） ──
+    # ── 目录/索引关键词 — URL 路径段中这些词表示非章节页 ──
     catalog_toc_index_words: Set[str] = field(default_factory=set)
 
-    # ── 目录分页 URL 正则 ──
+    # ── 目录分页 URL 正则 — 用于检测多页目录 ──
     catalog_page_patterns: List[Pattern] = field(default_factory=list)
 
-    # ── "最新/全部章节"检测用的搜索标签 ──
+    # ── "最新/全部章节"检测用的 HTML 标签 ──
     toc_section_search_tags: List[str] = field(default_factory=list)
 
     # ── "最新/全部章节"检测用的关键词 ──
     toc_section_keywords: List[str] = field(default_factory=list)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# 通用默认配置
-# ═══════════════════════════════════════════════════════════════════
-
+# ═══════════════════════════════════════════════════════════════
+# 通用默认配置 — 适用于大多数未知网站
+# ═══════════════════════════════════════════════════════════════
 UNIVERSAL_CONFIG = SiteConfig(
     name="通用",
 
@@ -236,7 +273,7 @@ UNIVERSAL_CONFIG = SiteConfig(
         'hm_t_20123', 'ad', 'ads', 'advert', 'gg',
     },
 
-    # 正文选择器探测列表 (包含反爬变体如 C0NTENT, c0ntent)
+    # 常见选择器 (包含反爬变体如 C0NTENT, c0ntent)
     content_selectors=[
         '#content', '#chaptercontent', '#booktext',
         '#readcontent', '#TextContent', '#htmlContent',
@@ -276,38 +313,43 @@ UNIVERSAL_CONFIG = SiteConfig(
         '//h1/text()',
     ],
 
-    # "下一页"链接文本
+    # "下一页"文本
     next_page_texts=['下一页', '下一頁', '下页', 'next', 'Next', 'NEXT'],
 
     # URL 跳过扩展名
     url_skip_extensions=('.css', '.js', '.png', '.jpg', '.gif', '.ico',
                          '.mp3', '.mp4', '.zip', '.rar', '.txt', '.pdf'),
 
-    # 目录/索引关键词（URL 路径段排除用）
+    # 目录/索引关键词 — URL 路径段排除用
     catalog_toc_index_words={'catalog', 'toc', 'index', 'list', 'tag', 'tags',
                              'category', 'sort', 'class', 'search', 'page',
                              'author', 'top', 'rank', 'hot'},
 
     # 目录分页 URL 正则
     catalog_page_patterns=[
+        # 匹配 catalog/d_N.html 模式
         re.compile(r'/catalog/d_\d+\.html', re.I),
+        # 匹配 catalog/N.html 模式
         re.compile(r'/catalog/\d+\.html', re.I),
     ],
 
-    # "最新/全部章节"检测用的搜索标签
+    # "最新/全部章节"检测用的搜索标签 — 只在标题类元素中搜索
     toc_section_search_tags=['dt', 'h1', 'h2', 'h3', 'h4', 'p', 'span'],
 
     # "最新/全部章节"检测用的关键词
     toc_section_keywords=['最新章节', '全部章节', '章节列表'],
 )
 
+# ═══════════════════════════════════════════════════════════════
+# 网站配置字典 — 集中管理所有网站
+# ═══════════════════════════════════════════════════════════════
 WEBSITE_CONFIGS: Dict[str, SiteConfig] = {
     "universal": UNIVERSAL_CONFIG,
 }
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 控制台工具
+# ═══════════════════  控制台工具（独立区域）  ══════════════════════
 # ═══════════════════════════════════════════════════════════════════
 def init_console():
     if sys.platform == 'win32':
@@ -340,9 +382,11 @@ def banner():
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 核心爬虫
+# ═══════════════════  核心爬虫逻辑（零硬编码规则）  ════════════════
 # ═══════════════════════════════════════════════════════════════════
 class NovelCrawler:
+    """通用小说爬虫 — 所有网站规则通过 self.config 引用，全局设置通过 self.settings 引用"""
+
     def __init__(self, config: Optional[SiteConfig] = None):
         self.config = config if config is not None else UNIVERSAL_CONFIG
         self.settings = GLOBAL_SETTINGS
@@ -364,32 +408,36 @@ class NovelCrawler:
     def fetch(self, url, retries=None):
         if retries is None:
             retries = self.settings["max_retries"]
+        timeout = self.settings["timeout"]
         for i in range(retries):
             try:
-                r = self.session.get(url, timeout=self.settings["timeout"], allow_redirects=True)
+                r = self.session.get(url, timeout=timeout, allow_redirects=True)
                 if r.status_code == 200:
                     # 检测真实编码: HTTP 头的 ISO-8859-1 通常是默认值，不可靠
                     encoding = r.encoding
-                    if encoding and encoding.lower() in ('iso-8859-1', 'latin-1'):
+                    if encoding and encoding.lower() in self.settings["encoding_fallbacks"]:
                         # 从 HTML <meta charset> 或 XML 声明检测
-                        raw = r.content[:2000]
+                        raw = r.content[:self.settings["encoding_detect_bytes"]]
                         m = re.search(rb'charset[="\s]+([a-zA-Z0-9_-]+)', raw)
                         if m:
                             encoding = m.group(1).decode('ascii')
                         else:
-                            encoding = 'utf-8'
-                    r.encoding = encoding or 'utf-8'
+                            encoding = self.settings["default_encoding"]
+                    r.encoding = encoding or self.settings["default_encoding"]
                     return r
                 p(f"  ⚠ HTTP {r.status_code}: {url}", "y")
             except Exception as e:
                 p(f"  ⚠ 请求失败 ({i+1}/{retries}): {e}", "y")
                 if i < retries - 1:
-                    time.sleep(random.uniform(2, 4))
+                    time.sleep(random.uniform(
+                        self.settings["retry_delay_min"],
+                        self.settings["retry_delay_max"]))
         return None
 
     # ── 解析 HTML ─────────────────────────────────────────────
     def parse(self, resp):
-        parser = lxml_html.HTMLParser(encoding=resp.encoding or 'utf-8', recover=True)
+        encoding = resp.encoding or self.settings["default_encoding"]
+        parser = lxml_html.HTMLParser(encoding=encoding, recover=True)
         return lxml_html.fromstring(resp.content, parser=parser)
 
     # ── 解析 javascript: 链接 ─────────────────────────────────
@@ -497,6 +545,8 @@ class NovelCrawler:
 
         search_tags = self.config.toc_section_search_tags
         keywords = self.config.toc_section_keywords
+        search_range = self.settings["toc_sibling_search_range"]
+        title_max = self.settings["title_max_len"]
 
         # 只在标题类元素中搜索，避免匹配 <title>/<script>/<meta> 等
         for tag in search_tags:
@@ -512,7 +562,7 @@ class NovelCrawler:
                             result['has_latest'] = True
                             # 找后面的 ul/dl/ol 兄弟
                             nxt = elem
-                            for _ in range(10):
+                            for _ in range(search_range):
                                 nxt = nxt.getnext()
                                 if nxt is None:
                                     break
@@ -538,7 +588,7 @@ class NovelCrawler:
                                             for a in dd.xpath('.//a[@href]'):
                                                 href = (a.get('href') or '').strip()
                                                 title = (a.text_content() or '').strip()
-                                                if href and title and len(title) <= self.settings["title_max_len"]:
+                                                if href and title and len(title) <= title_max:
                                                     links.append((title, href))
                                         dd = dd.getnext()
                                     if links:
@@ -547,7 +597,7 @@ class NovelCrawler:
                         if '全部章节' in text or '章节列表' in text:
                             result['has_all'] = True
                             nxt = elem
-                            for _ in range(10):
+                            for _ in range(search_range):
                                 nxt = nxt.getnext()
                                 if nxt is None:
                                     break
@@ -578,12 +628,14 @@ class NovelCrawler:
         if len(toc_pages) > 1:
             p(f"  📄 检测到 {len(toc_pages)} 页目录，正在加载...", "y")
             all_docs = [doc]
+            toc_d_min = self.settings["toc_page_delay_min"]
+            toc_d_max = self.settings["toc_page_delay_max"]
             for page_url in toc_pages[1:]:
                 p(f"  📄 加载: {page_url}", "d")
                 resp = self.fetch(page_url)
                 if resp:
                     all_docs.append(self.parse(resp))
-                time.sleep(random.uniform(0.3, 0.8))
+                time.sleep(random.uniform(toc_d_min, toc_d_max))
         else:
             all_docs = [doc]
 
@@ -598,11 +650,13 @@ class NovelCrawler:
 
         # 按父容器分组，找章节链接最多的容器
         containers = {}
+        title_max = self.settings["title_max_len"]
+        container_depth = self.settings["toc_container_search_depth"]
 
         for a in all_links:
             href = (a.get('href') or '').strip()
             title = (a.text_content() or '').strip()
-            if not href or not title or len(title) > self.settings["title_max_len"]:
+            if not href or not title or len(title) > title_max:
                 continue
 
             # 处理 javascript: 链接
@@ -621,7 +675,7 @@ class NovelCrawler:
             # 找父容器
             parent = a.getparent()
             container_key = None
-            for _ in range(5):
+            for _ in range(container_depth):
                 if parent is None:
                     break
                 tag = parent.tag
@@ -642,6 +696,8 @@ class NovelCrawler:
         if not containers:
             return []
 
+        order_threshold = self.settings["toc_min_chapters_for_order"]
+
         # ── 如果检测到"全部章节"链接列表（dl/dt/dd 结构）───
         if section_info['all_links']:
             unique = []
@@ -655,7 +711,7 @@ class NovelCrawler:
                     unique.append((title, full_url))
             if unique:
                 p(f"  ✓ 使用\"正文\"区域: {len(unique)} 个章节", "g")
-                if len(unique) >= 3:
+                if len(unique) >= order_threshold:
                     unique = self._fix_chapter_order(unique)
                 return unique
 
@@ -667,7 +723,7 @@ class NovelCrawler:
             for a in all_ul.xpath('.//a[@href]'):
                 href = (a.get('href') or '').strip()
                 title = (a.text_content() or '').strip()
-                if not href or not title or len(title) > self.settings["title_max_len"]:
+                if not href or not title or len(title) > title_max:
                     continue
                 if href.startswith('javascript:'):
                     js_path = self._parse_js_link(href)
@@ -685,7 +741,7 @@ class NovelCrawler:
 
             if unique:
                 p(f"  ✓ 使用\"全部章节\"区域: {len(unique)} 个章节", "g")
-                if len(unique) >= 3:
+                if len(unique) >= order_threshold:
                     unique = self._fix_chapter_order(unique)
                 return unique
 
@@ -714,7 +770,7 @@ class NovelCrawler:
         p(f"  ✓ 识别到 {len(unique)} 个章节", "g")
 
         # ── 检测正序/倒序 ────────────────────────────────────
-        if len(unique) >= 3:
+        if len(unique) >= order_threshold:
             unique = self._fix_chapter_order(unique)
 
         return unique
@@ -723,6 +779,8 @@ class NovelCrawler:
     def _fix_chapter_order(self, chapters):
         """检测目录是正序还是倒序，倒序则翻转。
         不再按章节号排序，避免子小节被打乱。"""
+        desc_threshold = self.settings["toc_desc_ratio_threshold"]
+        asc_threshold = self.settings["toc_asc_ratio_threshold"]
 
         # 策略1: 提取 URL 路径中的数字，判断趋势
         url_nums = []
@@ -756,10 +814,10 @@ class NovelCrawler:
             total_pairs = asc_count + desc_count
             if total_pairs > 0:
                 desc_ratio = desc_count / total_pairs
-                if desc_ratio > 0.7:
+                if desc_ratio > desc_threshold:
                     p("  ↻ 检测到目录倒序（URL数字递减），已翻转为正序", "y")
                     return list(reversed(chapters))
-                elif desc_ratio < 0.3:
+                elif desc_ratio < asc_threshold:
                     # 正序，不需要处理
                     return chapters
 
@@ -793,7 +851,7 @@ class NovelCrawler:
             total_pairs = asc_count + desc_count
             if total_pairs > 0:
                 desc_ratio = desc_count / total_pairs
-                if desc_ratio > 0.7:
+                if desc_ratio > desc_threshold:
                     p("  ↻ 检测到目录倒序（标题数字递减），已翻转为正序", "y")
                     return list(reversed(chapters))
 
@@ -827,6 +885,9 @@ class NovelCrawler:
         doc = self.parse(resp)
 
         selectors = self.config.content_selectors
+        content_min = self.settings["content_min_text_len"]
+        density_max = self.settings["link_density_max"]
+        score_threshold = self.settings["content_selector_score_threshold"]
 
         best = None
         best_score = 0
@@ -840,14 +901,12 @@ class NovelCrawler:
                 for elem in elems:
                     text = self._clean_text(elem)
                     text_len = len(text)
-                    content_min = self.settings["content_min_text_len"]
                     if text_len < content_min:
                         continue
 
                     # 链接密度惩罚: 密度越高，score 越低
                     density = self._link_density(elem)
-                    link_density_max = self.settings["link_density_max"]
-                    if density > link_density_max:
+                    if density > density_max:
                         continue  # 导航/侧边栏，直接跳过
 
                     # 综合评分: 文本长度 × (1 - 密度)²
@@ -859,12 +918,12 @@ class NovelCrawler:
             except Exception:
                 continue
 
-        if best and best_score > 100:
+        if best and best_score > score_threshold:
             p(f"  ✓ 正文选择器: {best} (score={best_score:.0f})", "g")
         else:
             p("  ⚠ 通用模式：找最大文本块", "y")
 
-        return best if best_score > 100 else None
+        return best if best_score > score_threshold else None
 
     def _clean_text(self, elem):
         """清理元素文本 — 移除噪音子元素"""
@@ -885,10 +944,11 @@ class NovelCrawler:
                 if parent is not None:
                     parent.remove(node)
 
+        part_min = self.settings["content_part_min_len"]
         parts = []
         for t in elem.itertext():
             t = t.strip()
-            if t and len(t) > 1:
+            if t and len(t) > part_min:
                 parts.append(t)
         return '\n'.join(parts)
 
@@ -923,6 +983,13 @@ class NovelCrawler:
     def extract_content(self, doc, selector=None):
         text = ""
 
+        content_min = self.settings["content_min_text_len"]
+        heuristic_min = self.settings["content_heuristic_min_len"]
+        fallback_min = self.settings["content_fallback_min_len"]
+        density_max = self.settings["link_density_max"]
+        density_para_max = self.settings["link_density_para_max"]
+        para_min_len = self.settings["content_para_min_len"]
+
         if selector:
             try:
                 if selector.startswith('//'):
@@ -933,10 +1000,6 @@ class NovelCrawler:
                     text = self._clean_text(elems[0])
             except Exception:
                 pass
-
-        content_min = self.settings["content_min_text_len"]
-        heuristic_min = self.settings["content_heuristic_min_len"]
-        link_density_max = self.settings["link_density_max"]
 
         if not text or len(text) < content_min:
             # 启发式: 找最长文本的 div，但排除链接密度高的
@@ -950,7 +1013,7 @@ class NovelCrawler:
                         continue
 
                     density = self._link_density(div)
-                    if density > link_density_max:
+                    if density > density_max:
                         continue  # 导航/侧边栏，跳过
 
                     score = t_len * (1.0 - density)
@@ -962,17 +1025,13 @@ class NovelCrawler:
             if best_text:
                 text = best_text
 
-        fallback_min = self.settings["content_fallback_min_len"]
-        link_density_para_max = self.settings["link_density_para_max"]
-        para_min_len = self.settings["content_para_min_len"]
-
         if not text or len(text) < fallback_min:
             # 最后手段: 所有 p 标签，但排除高链接密度的
             paras = []
             for p_elem in doc.xpath('//p'):
                 try:
                     density = self._link_density(p_elem)
-                    if density > link_density_para_max:
+                    if density > density_para_max:
                         continue
                     t = p_elem.text_content().strip()
                     if t and len(t) > para_min_len:
@@ -993,6 +1052,8 @@ class NovelCrawler:
     # ── 提取小说标题（从目录页） ─────────────────────────────
     def extract_novel_title(self, doc):
         """从目录页提取小说标题"""
+        t_min = self.settings["title_min_len"]
+        t_max = self.settings["title_max_len"]
         for sel in self.config.novel_title_selectors:
             try:
                 titles = doc.xpath(sel)
@@ -1002,8 +1063,6 @@ class NovelCrawler:
                     t = re.sub(r'最新章节.*|全文阅读.*|全文.*|在线阅读.*', '', t)
                     t = re.sub(r'_(小说网|笔趣阁|阅读网|文学网|书屋)$', '', t)
                     t = re.sub(r'[\s\-_]+$', '', t)
-                    t_min = self.settings["title_min_len"]
-                    t_max = self.settings["title_max_len"]
                     if t and t_min < len(t) < t_max:
                         return t
             except Exception:
@@ -1126,7 +1185,7 @@ class NovelCrawler:
         with self.lock:
             done = self.progress_done
         pct = done / total * 100
-        bar_w = 30
+        bar_w = self.settings["progress_bar_width"]
         filled = int(bar_w * done / total)
         bar = '█' * filled + '░' * (bar_w - filled)
         p(f"\r  [{bar}] {pct:.0f}% ({done}/{total}) {self._failed_count_locked()} 失败", "c", end="")
@@ -1199,6 +1258,7 @@ class NovelCrawler:
 
         # 并发线程数选择
         max_workers = self.settings["max_workers"]
+        workers_limit = self.settings["max_workers_limit"]
         p("⚡ 并发线程数设置（同时下载的章节数）:", "b")
         print()
         p("  🐢 保守 [5~6] — 几乎不触发反爬，适合小站 / 敏感网站", "d")
@@ -1216,9 +1276,9 @@ class NovelCrawler:
                 if num_workers < 1:
                     p("  线程数不能小于 1，使用默认值", "y")
                     num_workers = max_workers
-                elif num_workers > 50:
-                    p("  ⚠ 线程数过大（>50），已限制为 50", "y")
-                    num_workers = 50
+                elif num_workers > workers_limit:
+                    p(f"  ⚠ 线程数过大（>{workers_limit}），已限制为 {workers_limit}", "y")
+                    num_workers = workers_limit
             except ValueError:
                 p("  输入无效，使用默认值", "y")
                 num_workers = max_workers
@@ -1326,11 +1386,12 @@ class NovelCrawler:
                 if not name:
                     name = re.sub(r'^\d+[.、\s]+', '', first).strip()
                 if not name:
-                    name = "小说"
+                    name = self.settings["default_novel_name"]
             else:
-                name = "小说"
+                name = self.settings["default_novel_name"]
 
-        safe = re.sub(r'[\\/:*?"<>|\n\r\t]', '_', name)[:80]
+        filename_max = self.settings["filename_max_len"]
+        safe = re.sub(r'[\\/:*?"<>|\n\r\t]', '_', name)[:filename_max]
         output_dir = self.settings["output_dir"]
         path = os.path.join(output_dir, f"{safe}.txt")
 
@@ -1340,7 +1401,7 @@ class NovelCrawler:
                 i += 1
             path = os.path.join(output_dir, f"{safe}_{i}.txt")
 
-        with open(path, 'w', encoding='utf-8') as f:
+        with open(path, 'w', encoding=self.settings["default_encoding"]) as f:
             f.write(f"{'='*60}\n")
             f.write(f"  {name}\n")
             f.write(f"  来源: {self.domain}\n")
