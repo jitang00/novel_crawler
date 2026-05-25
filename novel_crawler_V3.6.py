@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-万能小说爬虫 v3.5 — 通用中文小说下载器
+万能小说爬虫 v3.6 — 通用中文小说下载器
 支持大部分小说网站，自动识别章节目录和正文，导出为 TXT 文件。
 
 v3.0: 链接密度过滤、扩展广告关键词、排除分类路径
@@ -12,6 +12,7 @@ v3.2: 简化排序逻辑 — 识别"最新章节"/"全部章节"分类，通过 
 v3.3: 跟随章节内"下一页"子页 — 一章分多页时自动拼接完整内容
 v3.4: 多线程并发爬取 — 10 线程同时下载，自动按序拼接
 v3.5: 自定义线程数 + 免责声明
+v3.6: 代码加固 — 去 emoji、429/403 退避、编码增强、异常可见、BOM 兼容
 
 双击运行 EXE → 粘贴目录页 URL → 自动爬取全部章节 → 导出 TXT
 
@@ -159,11 +160,11 @@ def p(text, color="", end="\n"):
     print(f"{prefix}{text}{suffix}", end=end, flush=True)
 
 def banner():
-    p("═" * 56, "c")
-    p("  📚 万能小说爬虫 v3.5", "b")
+    p("=" * 56, "c")
+    p("  [*] 万能小说爬虫 v3.6", "b")
     p("  自动识别目录 | 智能提取正文 | 导出 TXT", "d")
-    p("  ⚠ 本程序仅供学习交流使用，请勿用于非法用途", "y")
-    p("═" * 56, "c")
+    p("  [!] 本程序仅供学习交流使用，请勿用于非法用途", "y")
+    p("=" * 56, "c")
     print()
 
 
@@ -187,27 +188,37 @@ class NovelCrawler:
 
     # ── 请求 ──────────────────────────────────────────────────
     def fetch(self, url, retries=MAX_RETRIES):
+        last_status = 0
         for i in range(retries):
             try:
                 r = self.session.get(url, timeout=TIMEOUT, allow_redirects=True)
                 if r.status_code == 200:
-                    # 检测真实编码: HTTP 头的 ISO-8859-1 通常是默认值，不可靠
                     encoding = r.encoding
                     if encoding and encoding.lower() in ('iso-8859-1', 'latin-1'):
-                        # 从 HTML <meta charset> 或 XML 声明检测
-                        raw = r.content[:2000]
+                        raw = r.content[:4096]
                         m = re.search(rb'charset[="\s]+([a-zA-Z0-9_-]+)', raw)
                         if m:
                             encoding = m.group(1).decode('ascii')
                         else:
-                            encoding = 'utf-8'
+                            try:
+                                encoding = r.apparent_encoding or 'utf-8'
+                            except Exception:
+                                encoding = 'utf-8'
                     r.encoding = encoding or 'utf-8'
                     return r
-                p(f"  ⚠ HTTP {r.status_code}: {url}", "y")
+                elif r.status_code in (429, 403):
+                    wait = min(2 ** (i + 1), 120)
+                    p(f"  [!] HTTP {r.status_code} 限流/禁止，{wait}s 后重试 ({i+1}/{retries})", "y")
+                    time.sleep(wait + random.uniform(0, wait * 0.5))
+                    last_status = r.status_code
+                else:
+                    p(f"  [!] HTTP {r.status_code}: {url}", "y")
             except Exception as e:
-                p(f"  ⚠ 请求失败 ({i+1}/{retries}): {e}", "y")
+                wait = random.uniform(1, 4)
+                p(f"  [!] 请求失败 ({i+1}/{retries}): {e}", "y")
                 if i < retries - 1:
-                    time.sleep(random.uniform(2, 4))
+                    time.sleep(wait)
+                traceback.print_exc()
         return None
 
     # ── 解析 HTML ─────────────────────────────────────────────
@@ -378,6 +389,8 @@ class NovelCrawler:
                                     result['all_container'] = nxt
                                     break
                 except Exception:
+                    if not getattr(sys, 'frozen', False):
+                        traceback.print_exc()
                     continue
 
         return result
@@ -389,20 +402,20 @@ class NovelCrawler:
         # 检测"最新章节"/"全部章节"分类
         section_info = self._detect_toc_sections(doc)
         if section_info['has_latest'] and section_info['has_all']:
-            p("  📑 检测到分类: 最新章节 + 全部章节", "g")
-            p('  → 优先使用"全部章节"区域（完整列表）', "d")
+            p("  [*] 检测到分类: 最新章节 + 全部章节", "g")
+            p('  -> 优先使用"全部章节"区域（完整列表）', "d")
         elif section_info['has_latest']:
-            p("  📑 检测到: 最新章节（可能只有部分章节）", "y")
+            p("  [*] 检测到: 最新章节（可能只有部分章节）", "y")
         elif section_info['has_all']:
-            p("  📑 检测到: 全部章节", "g")
+            p("  [*] 检测到: 全部章节", "g")
 
         # 检测分页，收集所有目录页
         toc_pages = self._collect_toc_pages(doc, self.base_url)
         if len(toc_pages) > 1:
-            p(f"  📄 检测到 {len(toc_pages)} 页目录，正在加载...", "y")
+            p(f"  [*] 检测到 {len(toc_pages)} 页目录，正在加载...", "y")
             all_docs = [doc]
             for page_url in toc_pages[1:]:
-                p(f"  📄 加载: {page_url}", "d")
+                p(f"  [*] 加载: {page_url}", "d")
                 resp = self.fetch(page_url)
                 if resp:
                     all_docs.append(self.parse(resp))
@@ -416,7 +429,7 @@ class NovelCrawler:
             all_links.extend(d.xpath('//a[@href]'))
 
         if not all_links:
-            p("  ✗ 页面中没有链接", "r")
+            p("  [FAIL] 页面中没有链接", "r")
             return []
 
         # 按父容器分组，找章节链接最多的容器
@@ -477,7 +490,7 @@ class NovelCrawler:
                     seen.add(full_url)
                     unique.append((title, full_url))
             if unique:
-                p(f"  ✓ 使用\"正文\"区域: {len(unique)} 个章节", "g")
+                p(f"  [OK] 使用\"正文\"区域: {len(unique)} 个章节", "g")
                 if len(unique) >= 3:
                     unique = self._fix_chapter_order(unique)
                 return unique
@@ -507,7 +520,7 @@ class NovelCrawler:
                     unique.append((title, full_url))
 
             if unique:
-                p(f"  ✓ 使用\"全部章节\"区域: {len(unique)} 个章节", "g")
+                p(f"  [OK] 使用\"全部章节\"区域: {len(unique)} 个章节", "g")
                 if len(unique) >= 3:
                     unique = self._fix_chapter_order(unique)
                 return unique
@@ -533,8 +546,8 @@ class NovelCrawler:
                     seen.add(u)
                     unique.append((t, u))
 
-        p(f"  ✓ 主目录容器: {best}", "g")
-        p(f"  ✓ 识别到 {len(unique)} 个章节", "g")
+        p(f"  [OK] 主目录容器: {best}", "g")
+        p(f"  [OK] 识别到 {len(unique)} 个章节", "g")
 
         # ── 检测正序/倒序 ────────────────────────────────────
         if len(unique) >= 3:
@@ -580,7 +593,7 @@ class NovelCrawler:
             if total_pairs > 0:
                 desc_ratio = desc_count / total_pairs
                 if desc_ratio > 0.7:
-                    p("  ↻ 检测到目录倒序（URL数字递减），已翻转为正序", "y")
+                    p("  [>] 检测到目录倒序（URL数字递减），已翻转为正序", "y")
                     return list(reversed(chapters))
                 elif desc_ratio < 0.3:
                     # 正序，不需要处理
@@ -617,7 +630,7 @@ class NovelCrawler:
             if total_pairs > 0:
                 desc_ratio = desc_count / total_pairs
                 if desc_ratio > 0.7:
-                    p("  ↻ 检测到目录倒序（标题数字递减），已翻转为正序", "y")
+                    p("  [>] 检测到目录倒序（标题数字递减），已翻转为正序", "y")
                     return list(reversed(chapters))
 
         # 无法判断，保持原序
@@ -696,12 +709,15 @@ class NovelCrawler:
                         best_score = score
                         best = sel
             except Exception:
+                if getattr(sys, 'frozen', False):
+                    continue
+                traceback.print_exc()
                 continue
 
         if best and best_score > 100:
-            p(f"  ✓ 正文选择器: {best} (score={best_score:.0f})", "g")
+            p(f"  [OK] 正文选择器: {best} (score={best_score:.0f})", "g")
         else:
-            p("  ⚠ 通用模式：找最大文本块", "y")
+            p("  [!] 通用模式: 找最大文本块", "y")
 
         return best if best_score > 100 else None
 
@@ -781,7 +797,9 @@ class NovelCrawler:
                 if elems:
                     text = self._clean_text(elems[0])
             except Exception:
-                pass
+                    if not getattr(sys, 'frozen', False):
+                        traceback.print_exc()
+                    pass
 
         if not text or len(text) < 100:
             # 启发式: 找最长文本的 div，但排除链接密度高的
@@ -803,6 +821,8 @@ class NovelCrawler:
                         best_score = score
                         best_text = t
                 except Exception:
+                    if not getattr(sys, 'frozen', False):
+                        traceback.print_exc()
                     continue
             if best_text:
                 text = best_text
@@ -819,7 +839,9 @@ class NovelCrawler:
                     if t and len(t) > 5:
                         paras.append(t)
                 except Exception:
-                    continue
+                        if not getattr(sys, 'frozen', False):
+                            traceback.print_exc()
+                        continue
             text = '\n'.join(paras)
 
         # 清理: 逐行过滤噪音
@@ -855,6 +877,8 @@ class NovelCrawler:
                     if t and 2 < len(t) < 100:
                         return t
             except Exception:
+                if not getattr(sys, 'frozen', False):
+                    traceback.print_exc()
                 continue
         return None
 
@@ -871,6 +895,8 @@ class NovelCrawler:
                     if t and 2 < len(t) < 80:
                         return t
             except Exception:
+                if not getattr(sys, 'frozen', False):
+                    traceback.print_exc()
                 continue
         return None
 
@@ -989,9 +1015,9 @@ class NovelCrawler:
         banner()
 
         # 获取 URL
-        p("📖 请输入小说目录页 URL:", "b")
+        p("[*] 请输入小说目录页 URL:", "b")
         p("   (大部分小说网站的目录/索引页均可)", "d")
-        url = input("   URL ▶ ").strip()
+        url = input("   URL > ").strip()
         if not url:
             p("[错误] URL 不能为空", "r")
             input("按回车键退出...")
@@ -1004,8 +1030,8 @@ class NovelCrawler:
         self.domain = urlparse(url).netloc
 
         print()
-        p(f"🌐 目标: {self.domain}", "c")
-        p(f"🔗 地址: {url}", "d")
+        p(f"[*] 目标: {self.domain}", "c")
+        p(f"    地址: {url}", "d")
         print()
 
         # 获取目录页
@@ -1016,13 +1042,13 @@ class NovelCrawler:
             input("\n按回车键退出...")
             return
 
-        p(f"  ✓ 页面获取成功 (HTTP {resp.status_code})", "g")
+        p(f"  [OK] 页面获取成功 (HTTP {resp.status_code})", "g")
         doc = self.parse(resp)
 
         # 提取小说标题
         self.novel_title = self.extract_novel_title(doc)
         if self.novel_title:
-            p(f"  📚 小说标题: {self.novel_title}", "g")
+            p(f"  [*] 小说标题: {self.novel_title}", "g")
 
         # 检测目录
         chapters = self.detect_toc(doc)
@@ -1038,23 +1064,23 @@ class NovelCrawler:
 
         # 显示信息
         print()
-        p("─" * 50, "d")
-        p(f"  📋 共 {len(chapters)} 个章节", "b")
-        p(f"  📖 首章: {chapters[0][0]}", "d")
-        p(f"  📖 末章: {chapters[-1][0]}", "d")
-        p("─" * 50, "d")
+        p("-" * 50, "d")
+        p(f"  [*] 共 {len(chapters)} 个章节", "b")
+        p(f"  [*] 首章: {chapters[0][0]}", "d")
+        p(f"  [*] 末章: {chapters[-1][0]}", "d")
+        p("-" * 50, "d")
         print()
 
         # 并发线程数选择
-        p("⚡ 并发线程数设置（同时下载的章节数）:", "b")
+        p("[*] 并发线程数设置（同时下载的章节数）:", "b")
         print()
-        p("  🐢 保守 [5~6] — 几乎不触发反爬，适合小站 / 敏感网站", "d")
-        p("  ⚖️ 平衡 [8~12] — 速度与安全兼顾，适合大多数网站（推荐）", "d")
-        p("  🚀 激进 [15~20] — 速度快但可能触发限流 / 临时封 IP", "d")
-        p("  ☠️ 危险 [30+] — 必定触发反爬，可能导致永久封 IP", "d")
+        p("  [龟] 保守 [5~6] - 几乎不触发反爬，适合小站 / 敏感网站", "d")
+        p("  [衡] 平衡 [8~12] - 速度与安全兼顾，适合大多数网站（推荐）", "d")
+        p("  [快] 激进 [15~20] - 速度快但可能触发限流 / 临时封 IP", "d")
+        p("  [危] 危险 [30+] - 必定触发反爬，可能导致永久封 IP", "d")
         print()
         p(f"  默认 {MAX_WORKERS} 线程，直接回车使用默认值", "y")
-        workers_input = input("  请输入线程数 ▶ ").strip()
+        workers_input = input("  请输入线程数 > ").strip()
         if workers_input == "":
             num_workers = MAX_WORKERS
         else:
@@ -1064,7 +1090,7 @@ class NovelCrawler:
                     p("  线程数不能小于 1，使用默认值", "y")
                     num_workers = MAX_WORKERS
                 elif num_workers > 50:
-                    p("  ⚠ 线程数过大（>50），已限制为 50", "y")
+                    p("  [!] 线程数过大（>50），已限制为 50", "y")
                     num_workers = 50
             except ValueError:
                 p("  输入无效，使用默认值", "y")
@@ -1073,7 +1099,7 @@ class NovelCrawler:
 
         # 确认
         p(f"确认开始爬取？({num_workers} 线程) (y/n)", "y")
-        choice = input("   ▶ ").strip().lower()
+        choice = input("   > ").strip().lower()
         if choice not in ('y', 'yes', ''):
             p("已取消", "y")
             input("\n按回车键退出...")
@@ -1086,7 +1112,7 @@ class NovelCrawler:
         # 开始爬取
         print()
         p("═" * 50, "c")
-        p(f"  🚀 开始并发爬取 {len(chapters)} 个章节 ({num_workers} 线程)", "b")
+        p(f"  [>>] 开始并发爬取 {len(chapters)} 个章节 ({num_workers} 线程)", "b")
         p("═" * 50, "c")
         print()
 
@@ -1096,7 +1122,7 @@ class NovelCrawler:
 
         def on_interrupt(sig, frame):
             self.stop = True
-            p("\n\n⚠ 收到中断信号，等待进行中的任务完成...", "y")
+            p("\n\n[!] 收到中断信号，等待进行中的任务完成...", "y")
         signal.signal(signal.SIGINT, on_interrupt)
 
         results = []
@@ -1112,8 +1138,6 @@ class NovelCrawler:
                 futures[future] = i
 
             for future in as_completed(futures):
-                if self.stop:
-                    executor.shutdown(wait=False, cancel_futures=True)
                 try:
                     idx, page_title, lines = future.result()
                     if page_title is not None and lines is not None:
@@ -1131,13 +1155,13 @@ class NovelCrawler:
         # 统计
         elapsed = time.time() - t0
         print("\n")
-        p("═" * 50, "g")
-        p(f"  ✅ 爬取完成！", "g")
-        p(f"  📊 成功: {len(self.contents)}/{total} 章", "g")
+        p("=" * 50, "g")
+        p(f"  [OK] 爬取完成！", "g")
+        p(f"  [*] 成功: {len(self.contents)}/{total} 章", "g")
         if self.failed:
-            p(f"  ❌ 失败: {len(self.failed)} 章", "r")
-        p(f"  ⏱️  耗时: {elapsed:.1f} 秒", "g")
-        p("═" * 50, "g")
+            p(f"  [FAIL] 失败: {len(self.failed)} 章", "r")
+        p(f"  [*] 耗时: {elapsed:.1f} 秒", "g")
+        p("=" * 50, "g")
 
         if self.failed:
             print()
@@ -1154,7 +1178,7 @@ class NovelCrawler:
             size_kb = os.path.getsize(path) / 1024
             total_chars = sum(len('\n'.join(c)) for _, c in self.contents)
             print()
-            p(f"📄 已保存: {path}", "g")
+            p(f"[*] 已保存: {path}", "g")
             p(f"   大小: {size_kb:.1f} KB | 字数: {total_chars:,}", "d")
         else:
             p("\n[失败] 未成功爬取任何章节", "r")
@@ -1186,7 +1210,7 @@ class NovelCrawler:
                 i += 1
             path = os.path.join(OUTPUT_DIR, f"{safe}_{i}.txt")
 
-        with open(path, 'w', encoding='utf-8') as f:
+        with open(path, 'w', encoding='utf-8-sig') as f:
             f.write(f"{'='*60}\n")
             f.write(f"  {name}\n")
             f.write(f"  来源: {self.domain}\n")
