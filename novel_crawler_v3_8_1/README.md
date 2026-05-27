@@ -17,12 +17,6 @@ novel_crawler_v3_8_1/
 
 ## 快速开始
 
-### 方式 1: 双击运行（最简单）
-```bash
-# 双击运行爬虫.bat
-运行爬虫.bat
-```
-
 ### 方式 2: 命令行运行
 ```bash
 # Windows CMD / PowerShell
