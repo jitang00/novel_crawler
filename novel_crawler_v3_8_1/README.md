@@ -46,18 +46,7 @@ pip install requests lxml
 
 ## 打包为 EXE
 
-### 方法 1: 使用打包脚本（推荐）
-```bash
-# 双击运行
-打包.bat
-```
-
-### 方法 2: 使用 spec 文件
-```bash
-pyinstaller 万能小说爬虫.spec
-```
-
-### 方法 3: 命令行打包
+### 方法: 命令行打包
 ```bash
 pyinstaller ^
     --name "万能小说爬虫v3.8.1" ^
