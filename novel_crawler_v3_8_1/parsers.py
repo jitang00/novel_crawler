@@ -21,6 +21,12 @@ class HTMLParser:
 
     def __init__(self, site_config=None):
         self.config = site_config or DEFAULT_SITE_CONFIG
+        self._fetch_func = None
+        self._base_url = ""
+
+    def set_context(self, fetch_func, base_url):
+        self._fetch_func = fetch_func
+        self._base_url = base_url
 
     def parse(self, resp):
         """解析 HTTP 响应为 lxml 文档"""
@@ -93,10 +99,12 @@ class HTMLParser:
 
         return False
 
-    def detect_content_selector(self, sample_url, fetch_func, base_url):
+    def detect_content_selector(self, sample_url):
         """探测正文选择器"""
+        if not self._fetch_func:
+            return None
         p("  [探测] 分析正文选择器...", "d")
-        resp = fetch_func(sample_url, referer=base_url)
+        resp = self._fetch_func(sample_url, referer=self._base_url)
         if not resp:
             return None
 

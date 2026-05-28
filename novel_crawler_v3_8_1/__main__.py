@@ -11,6 +11,7 @@ import sys
 import traceback
 
 from .crawler import NovelCrawler
+from .console import safe_input
 
 
 def main():
@@ -22,7 +23,7 @@ def main():
     except Exception as e:
         print(f"\n[致命错误] {e}")
         traceback.print_exc()
-        input("按回车键退出...")
+        safe_input("按回车键退出...")
 
 
 if __name__ == '__main__':

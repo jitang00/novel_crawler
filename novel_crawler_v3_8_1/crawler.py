@@ -18,7 +18,7 @@ from urllib.parse import urljoin, urlparse
 import requests
 
 from .config import GLOBAL_SETTINGS, DEFAULT_SITE_CONFIG, SiteConfig
-from .console import p, init_console, banner, select_format
+from .console import p, init_console, banner, select_format, safe_input
 from .parsers import HTMLParser
 from .exporters import save_txt, save_epub
 from .updater import find_existing_file, parse_existing_chapters, update_existing_file
@@ -650,51 +650,41 @@ class NovelCrawler:
         with self.lock:
             return len(self.failed)
 
-    # ── 主流程 ────────────────────────────────────────────────
+    # ── 主流程 (run) ────────────────────────────────────────────
     def run(self):
         """主运行流程"""
         init_console()
         banner()
 
-        # 获取 URL
-        p("[*] 请输入小说目录页 URL:", "b")
-        p("   (大部分小说网站的目录/索引页均可)", "d")
-        url = input("   URL > ").strip()
+        url = self._prompt_url()
         if not url:
-            p("[错误] URL 不能为空", "r")
-            input("按回车键退出...")
             return
-
-        if not url.startswith('http'):
-            url = 'https://' + url
 
         self.base_url = url
         self.domain = urlparse(url).netloc
+        self.parser.set_context(self.fetch, self.base_url)
 
         print()
         p(f"[*] 目标: {self.domain}", "c")
         p(f"    地址: {url}", "d")
         print()
 
-        # 获取目录页
         p("[连接] 获取目录页面...", "y")
-        resp = self.fetch(url)  # 首次请求，无 Referer
+        resp = self.fetch(url)
         if not resp:
             p("[错误] 无法访问目标页面", "r")
-            input("\n按回车键退出...")
+            safe_input("\n按回车键退出...")
             return
 
         p(f"  [OK] 页面获取成功 (HTTP {resp.status_code})", "g")
         doc = self.parser.parse(resp)
 
-        # 提取小说标题
         self.novel_title = self.parser.extract_novel_title(doc)
         if self.novel_title:
             p(f"  [*] 小说标题: {self.novel_title}", "g")
 
-        # 检测目录
         chapters = self.detect_toc(doc)
-        all_chapters_for_url_set = list(chapters)  # 保存完整列表用于 chapter_url_set
+        all_chapters_for_url_set = list(chapters)
         if not chapters:
             print()
             p("[失败] 无法识别章节目录", "r")
@@ -702,10 +692,50 @@ class NovelCrawler:
             p("  1. URL 不是目录页（请粘贴目录页链接）", "d")
             p("  2. 网站需要 JavaScript 渲染", "d")
             p("  3. 网站结构非常特殊", "d")
-            input("\n按回车键退出...")
+            safe_input("\n按回车键退出...")
             return
 
-        # 显示信息
+        self._show_chapter_summary(chapters)
+
+        existing_file, update_mode, chapters = self._check_existing(chapters)
+        print()
+
+        num_workers = self._prompt_workers()
+
+        self.export_format = self._prompt_format()
+
+        if not self._confirm_crawl(num_workers):
+            return
+
+        print()
+        selector = self.parser.detect_content_selector(chapters[0][1])
+
+        chapter_url_set = set(u for _, u in (all_chapters_for_url_set or chapters))
+        self._crawl_chapters(chapters, selector, num_workers, chapter_url_set)
+
+        if self.failed:
+            self._retry_failed_chapters(chapter_url_set, selector)
+
+        self._save_results(chapters, existing_file, update_mode)
+        safe_input("\n按回车键退出...")
+
+    # ── 分解的子方法 ───────────────────────────────────────────
+
+    def _prompt_url(self):
+        """提示输入 URL，返回 URL 或 None"""
+        p("[*] 请输入小说目录页 URL:", "b")
+        p("   (大部分小说网站的目录/索引页均可)", "d")
+        url = safe_input("   URL > ").strip()
+        if not url:
+            p("[错误] URL 不能为空", "r")
+            safe_input("按回车键退出...")
+            return None
+        if not url.startswith('http'):
+            url = 'https://' + url
+        return url
+
+    def _show_chapter_summary(self, chapters):
+        """显示章节概要"""
         print()
         p("-" * 50, "d")
         p(f"  [*] 共 {len(chapters)} 个章节", "b")
@@ -714,31 +744,29 @@ class NovelCrawler:
         p("-" * 50, "d")
         print()
 
-        # 检测是否存在旧文件
+    def _check_existing(self, chapters):
+        """检测旧文件并处理更新模式，返回 (existing_file, update_mode, filtered_chapters)"""
         existing_file = None
         update_mode = False
         if self.novel_title:
             existing_file = find_existing_file(self.novel_title)
-        
+
         if existing_file:
             if existing_file.endswith('.epub'):
                 p(f"  [!] 检测到同名 EPUB 文件: {os.path.basename(existing_file)}", "y")
                 p("  [*] 更新功能仅支持 TXT，将新建文件", "d")
                 existing_file = None
-                update_mode = False
             else:
                 p(f"  [!] 检测到已存在同名文件: {os.path.basename(existing_file)}", "y")
                 print()
                 p("  [n] 新建文件 - 生成全新的 txt 文件（覆盖检测）", "d")
                 p("  [u] 更新文件 - 只爬取失败章节，更新旧文件", "d")
-                choice = input("  请选择操作 [n/u] > ").strip().lower()
+                choice = safe_input("  请选择操作 [n/u] > ").strip().lower()
                 if choice == 'u':
                     update_mode = True
                     p(f"  [OK] 将以更新模式运行，仅处理失败章节", "g")
-                    # 解析旧文件，获取失败章节信息
                     failed_indices = parse_existing_chapters(existing_file)
                     p(f"  [*] 旧文件中检测到 {len(failed_indices)} 个失败章节", "y")
-                    # 过滤出需要重新爬取的章节
                     chapters_to_fetch = [chapters[i] for i in failed_indices if i < len(chapters)]
                     if not chapters_to_fetch:
                         p("  [!] 没有需要更新的失败章节", "y")
@@ -748,9 +776,10 @@ class NovelCrawler:
                         chapters = chapters_to_fetch
         else:
             p("  [*] 未检测到同名旧文件", "d")
-        print()
+        return existing_file, update_mode, chapters
 
-        # 并发线程数选择
+    def _prompt_workers(self):
+        """提示输入线程数，返回线程数"""
         default_workers = self.global_settings["max_workers"]
         p("[*] 并发线程数设置（同时下载的章节数）:", "b")
         print()
@@ -760,47 +789,43 @@ class NovelCrawler:
         p("  [危] 危险 [30+] - 必定触发反爬，可能导致永久封 IP", "d")
         print()
         p(f"  默认 {default_workers} 线程，直接回车使用默认值", "y")
-        workers_input = input("  请输入线程数 > ").strip()
+        workers_input = safe_input("  请输入线程数 > ").strip()
         if workers_input == "":
-            num_workers = default_workers
-        else:
-            try:
-                num_workers = int(workers_input)
-                if num_workers < 1:
-                    p("  线程数不能小于 1，使用默认值", "y")
-                    num_workers = default_workers
-                elif num_workers > 50:
-                    p("  [!] 线程数过大（>50），已限制为 50", "y")
-                    num_workers = 50
-            except ValueError:
-                p("  输入无效，使用默认值", "y")
-                num_workers = default_workers
-        print()
+            return default_workers
+        try:
+            num_workers = int(workers_input)
+            if num_workers < 1:
+                p("  线程数不能小于 1，使用默认值", "y")
+                return default_workers
+            if num_workers > 50:
+                p("  [!] 线程数过大（>50），已限制为 50", "y")
+                return 50
+            return num_workers
+        except ValueError:
+            p("  输入无效，使用默认值", "y")
+            return default_workers
 
-        # 导出格式选择
+    def _prompt_format(self):
+        """提示选择导出格式"""
         p("[*] 导出格式选择（方向键上下选择，回车确认）:", "b")
         print()
-        self.export_format = select_format()
-        p(f"  [OK] 已选择: {self.export_format.upper()} 格式", "g")
+        fmt = select_format()
+        p(f"  [OK] 已选择: {fmt.upper()} 格式", "g")
         print()
+        return fmt
 
-        # 确认
+    def _confirm_crawl(self, num_workers):
+        """确认是否开始爬取"""
         p(f"确认开始爬取？({num_workers} 线程, {self.export_format.upper()} 格式) (y/n)", "y")
-        choice = input("   > ").strip().lower()
+        choice = safe_input("   > ").strip().lower()
         if choice not in ('y', 'yes', ''):
             p("已取消", "y")
-            input("\n按回车键退出...")
-            return
+            safe_input("\n按回车键退出...")
+            return False
+        return True
 
-        # 探测正文选择器
-        print()
-        selector = self.parser.detect_content_selector(
-            chapters[0][1],
-            lambda url, referer=None: self.fetch(url, referer=referer),
-            self.base_url
-        )
-
-        # 开始爬取
+    def _crawl_chapters(self, chapters, selector, num_workers, chapter_url_set):
+        """并发爬取所有章节"""
         print()
         p("═" * 50, "c")
         p(f"  [>>] 开始并发爬取 {len(chapters)} 个章节 ({num_workers} 线程)", "b")
@@ -809,9 +834,6 @@ class NovelCrawler:
 
         total = len(chapters)
         t0 = time.time()
-        # 完整目录 URL 集合 — 不受更新模式过滤影响，子页拼接需要完整集合
-        full_chapter_url_set = set(u for _, u in (all_chapters_for_url_set or chapters))
-        chapter_url_set = full_chapter_url_set
 
         def on_interrupt(sig, frame):
             self.stop = True
@@ -845,7 +867,6 @@ class NovelCrawler:
         for idx, page_title, lines in results:
             self.contents.append((idx, page_title, lines))
 
-        # 统计
         elapsed = time.time() - t0
         print("\n")
         p("=" * 50, "g")
@@ -856,91 +877,88 @@ class NovelCrawler:
         p(f"  [*] 耗时: {elapsed:.1f} 秒", "g")
         p("=" * 50, "g")
 
-        # ── 失败章节自动重试 ─────────────────────────────────
+    def _retry_failed_chapters(self, chapter_url_set, selector):
+        """自动重试失败章节"""
+        print()
+        p("失败章节:", "y")
+        for ft, fu, fi, fe in self.failed[:10]:
+            p(f"  - {ft}: {fe}", "d")
+        if len(self.failed) > 10:
+            p(f"  ... 还有 {len(self.failed)-10} 个", "d")
+
+        print()
+        print()
+        p(f"[*] 自动重试 {len(self.failed)} 个失败章节（2 线程）...", "c")
+        retry_failed = list(self.failed)
+        self.failed = []
+        retry_chapters = [(ft, fu) for ft, fu, fi, fe in retry_failed]
+        retry_original_indices = [fi for ft, fu, fi, fe in retry_failed]
+        retry_total = len(retry_chapters)
+        self.progress_done = 0
+
+        retry_results = []
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {}
+            for i, (title, url) in enumerate(retry_chapters):
+                if self.stop:
+                    break
+                orig_idx = retry_original_indices[i]
+                future = executor.submit(
+                    self._fetch_single_chapter,
+                    orig_idx, title, url, chapter_url_set, selector, retry_total
+                )
+                futures[future] = i
+            for future in as_completed(futures):
+                try:
+                    idx, page_title, lines = future.result()
+                    if page_title is not None and lines is not None:
+                        retry_results.append((idx, page_title, lines))
+                except Exception:
+                    pass
+
+        if retry_results:
+            retry_results.sort(key=lambda x: x[0])
+            for idx, page_title, lines in retry_results:
+                self.contents.append((idx, page_title, lines))
+            p(f"\n  [OK] 重试恢复 {len(retry_results)} 章", "g")
+
         if self.failed:
-            print()
-            p("失败章节:", "y")
-            for ft, fu, fi, fe in self.failed[:10]:
-                p(f"  - {ft}: {fe}", "d")
-            if len(self.failed) > 10:
-                p(f"  ... 还有 {len(self.failed)-10} 个", "d")
+            p(f"  [FAIL] 仍有 {len(self.failed)} 章失败", "r")
 
-            print()
-            print()  # 新行，避免覆盖之前的进度条
-            p(f"[*] 自动重试 {len(self.failed)} 个失败章节（2 线程）...", "c")
-            retry_failed = list(self.failed)
-            self.failed = []
-            retry_chapters = [(ft, fu) for ft, fu, fi, fe in retry_failed]
-            # 提取原始索引，用于重试后正确对齐
-            retry_original_indices = [fi for ft, fu, fi, fe in retry_failed]
-            retry_total = len(retry_chapters)
-            self.progress_done = 0
-
-            retry_results = []
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                futures = {}
-                for i, (title, url) in enumerate(retry_chapters):
-                    if self.stop:
-                        break
-                    orig_idx = retry_original_indices[i]
-                    future = executor.submit(
-                        self._fetch_single_chapter,
-                        orig_idx, title, url, chapter_url_set, selector, retry_total
-                    )
-                    futures[future] = i
-                for future in as_completed(futures):
-                    try:
-                        idx, page_title, lines = future.result()
-                        if page_title is not None and lines is not None:
-                            retry_results.append((idx, page_title, lines))
-                    except Exception:
-                        pass
-
-            if retry_results:
-                retry_results.sort(key=lambda x: x[0])
-                for idx, page_title, lines in retry_results:
-                    self.contents.append((idx, page_title, lines))
-                p(f"\n  [OK] 重试恢复 {len(retry_results)} 章", "g")
-
-            if self.failed:
-                p(f"  [FAIL] 仍有 {len(self.failed)} 章失败", "r")
-
-        # 保存
+    def _save_results(self, chapters, existing_file, update_mode):
+        """保存爬取结果"""
         ext = self.export_format
-        if self.contents:
-            print()
-            if update_mode and existing_file:
-                # 更新模式：只更新失败章节
-                if ext == 'epub':
-                    path = save_epub(
-                        self.contents, self.domain, self.novel_title,
-                        chapters, self.failed
-                    )
-                else:
-                    path = update_existing_file(existing_file, self.contents)
-                size_kb = os.path.getsize(path) / 1024
-                total_chars = sum(len('\n'.join(c)) for _, _, c in self.contents)
-                print()
-                p(f"[*] 已更新: {path}", "g")
-                p(f"   大小: {size_kb:.1f} KB | 本次更新字数: {total_chars:,}", "d")
-            else:
-                # 新建模式：保存完整内容，失败章节插入标记
-                if ext == 'epub':
-                    path = save_epub(
-                        self.contents, self.domain, self.novel_title,
-                        chapters, self.failed
-                    )
-                else:
-                    path = save_txt(
-                        self.contents, self.domain, self.novel_title,
-                        chapters, self.failed
-                    )
-                size_kb = os.path.getsize(path) / 1024
-                total_chars = sum(len('\n'.join(c)) for _, _, c in self.contents)
-                print()
-                p(f"[*] 已保存: {path}", "g")
-                p(f"   大小: {size_kb:.1f} KB | 字数: {total_chars:,}", "d")
-        else:
+        if not self.contents:
             p("\n[失败] 未成功爬取任何章节", "r")
+            return
 
-        input("\n按回车键退出...")
+        print()
+        if update_mode and existing_file:
+            if ext == 'epub':
+                path = save_epub(
+                    self.contents, self.domain, self.novel_title,
+                    chapters, self.failed
+                )
+            else:
+                path = update_existing_file(existing_file, self.contents)
+            size_kb = os.path.getsize(path) / 1024
+            total_chars = sum(len('\n'.join(c)) for _, _, c in self.contents)
+            print()
+            p(f"[*] 已更新: {path}", "g")
+            p(f"   大小: {size_kb:.1f} KB | 本次更新字数: {total_chars:,}", "d")
+        else:
+            if ext == 'epub':
+                path = save_epub(
+                    self.contents, self.domain, self.novel_title,
+                    chapters, self.failed
+                )
+            else:
+                path = save_txt(
+                    self.contents, self.domain, self.novel_title,
+                    chapters, self.failed
+                )
+            size_kb = os.path.getsize(path) / 1024
+            total_chars = sum(len('\n'.join(c)) for _, _, c in self.contents)
+            print()
+            p(f"[*] 已保存: {path}", "g")
+            p(f"   大小: {size_kb:.1f} KB | 字数: {total_chars:,}", "d")

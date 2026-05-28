@@ -43,6 +43,16 @@ def p(text, color="", end="\n"):
     print(f"{prefix}{text}{suffix}", end=end, flush=True)
 
 
+def safe_input(prompt=""):
+    """跨平台的 input() 包装，非交互模式下返回空字符串"""
+    if not sys.stdin.isatty():
+        return ""
+    try:
+        return input(prompt)
+    except EOFError:
+        return ""
+
+
 def banner():
     """显示程序横幅"""
     p("=" * 56, "c")
@@ -57,6 +67,9 @@ def select_format():
     """选择导出格式，返回 'txt' 或 'epub'"""
     options = ['txt', 'epub']
     labels = ['TXT (纯文本)', 'EPUB (电子书)']
+
+    if not sys.stdin.isatty():
+        return 'txt'
 
     if sys.platform == 'win32':
         import msvcrt

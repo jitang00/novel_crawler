@@ -17,7 +17,8 @@ from typing import List, Set
 if getattr(sys, 'frozen', False):
     _OUTPUT_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
-    _OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
+    _PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+    _OUTPUT_DIR = os.path.dirname(_PACKAGE_DIR)
 
 GLOBAL_SETTINGS = {
     # 输出目录
